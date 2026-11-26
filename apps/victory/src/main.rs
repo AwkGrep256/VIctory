@@ -10,6 +10,10 @@ mod menu_trace;
 mod prebuild;
 mod run;
 mod shader;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod title_patch;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod title_pattern;
 mod translate;
 
 use std::num::NonZeroUsize;

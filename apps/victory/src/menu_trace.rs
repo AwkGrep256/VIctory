@@ -24,10 +24,10 @@ use std::time::Duration;
 use anyhow::Result;
 use victory_loader::{LoadedImage, Redirect};
 
-mod pattern;
 mod rows;
+mod upscaling;
 
-use pattern::find_once;
+use crate::title_pattern::find_once;
 
 /// The section registration function, from its start through its first
 /// call that adds a section.
@@ -90,7 +90,10 @@ pub(crate) fn start(image: &LoadedImage) -> Result<()> {
     let Some((calls, callee)) = locate(image) else {
         return Ok(());
     };
-    if graphics && victory_gpu::switch::on("VICTORY_MENU_ROW_TRACE") {
+    if graphics
+        && (victory_gpu::switch::on("VICTORY_MENU_ROW_TRACE")
+            || victory_gpu::switch::on("VICTORY_MENU_UPSCALING_PROBE"))
+    {
         rows::install(image)?;
     }
     // Before any call can reach the handler.
@@ -275,8 +278,8 @@ fn changed_qwords(old: &[u8], new: &[u8]) -> Vec<(usize, u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::pattern::parse_pattern;
     use super::*;
+    use crate::title_pattern::parse_pattern;
     use std::sync::Mutex;
 
     const SITES: [usize; 8] = [0x67, 0x8f, 0xb2, 0xd5, 0xf8, 0x11b, 0x13e, 0x16e];

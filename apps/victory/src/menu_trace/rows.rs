@@ -6,13 +6,16 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use victory_loader::{LoadedImage, Redirect, read_memory};
 
-use super::pattern::find_once;
+use crate::title_pattern::find_once;
 
 use super::GRAPHICS_LABEL;
+use super::upscaling::UpscalingProbe;
 
 const DISPLAY_LABEL: u32 = 0x8cb1_18f1;
-const VISIT_SITE: &str = "4C 89 52 10 4C 89 4A 18 E8 ?? ?? ?? ?? 48 8D 54 24 34";
-const VISIT_CALL: usize = 8;
+const VISIT_SITE: &str = "48 8D 54 24 40 49 89 73 18 4C 89 1A 4C 89 4A 08 \
+                          4C 8D 0D ?? ?? ?? ?? 4C 89 52 10 4C 89 4A 18 E8 ?? ?? ?? ?? \
+                          48 8D 54 24 34";
+const VISIT_CALL: usize = 31;
 const VISIT_ENTRY: &str = "48 83 EC 58 48 8D 44 24 28 4C 8D 0D ?? ?? ?? ?? \
                            48 89 10 48 8D 54 24 38 4C 89 40 08 4C 8D 05 2D 00 00 00";
 const MAKE_SITE: &str = "C5 F8 29 01 48 8B 43 10 48 89 41 10 E8 ?? ?? ?? ?? 48 85 C0 74 ??";
@@ -29,6 +32,7 @@ struct Hooks {
     make: Make,
     image_base: usize,
     image_size: usize,
+    upscaling: Option<UpscalingProbe>,
 }
 
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
@@ -71,6 +75,7 @@ pub(super) fn install(image: &LoadedImage) -> Result<()> {
             make: std::mem::transmute::<usize, Make>(image_base + make),
             image_base,
             image_size: image.info().size_of_image as usize,
+            upscaling: UpscalingProbe::locate(image),
         }
     };
     if HOOKS.set(hooks).is_err() {
@@ -112,15 +117,26 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
     let Some(hooks) = HOOKS.get() else { return };
     // The visitor descriptor starts with its context pointer. The caller
     // writes the selected tab's ID to the context before calling the visitor.
-    let label = read_memory(visitor, 8)
+    let context = read_memory(visitor, 8)
         .and_then(|p| usize_at(&p, 0))
-        .and_then(|context| context.checked_add(0x10))
-        .and_then(|at| read_memory(at, 4))
-        .and_then(|bytes| i32_at(&bytes, 0))
+        .and_then(|context| read_memory(context, 0x20));
+    let label = context
+        .as_deref()
+        .and_then(|bytes| i32_at(bytes, 0x10))
         .unwrap_or_default() as u32;
     let previous = VISIT.replace(VisitState { label, made: 0 });
     (hooks.visit)(source, visitor, after);
     let current = VISIT.replace(previous);
+    if label == GRAPHICS_LABEL
+        && current.made != 0
+        && let Some(probe) = &hooks.upscaling
+        && let Some(owner) = context.as_deref().and_then(|bytes| usize_at(bytes, 0x18))
+        && owner != 0
+    {
+        // SAFETY: this is the live menu for the tab being built at the
+        // verified call, after the stock row traversal and before flattening.
+        unsafe { probe.append(owner) };
+    }
     if matches!(current.label, DISPLAY_LABEL | GRAPHICS_LABEL) {
         tracing::info!(target: "menu_trace", tab = %format_args!("{:08x}", current.label),
                        rows = current.made, "native settings rows constructed");

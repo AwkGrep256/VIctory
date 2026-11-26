@@ -25,6 +25,8 @@ pub struct Config {
     /// The user's copy of AMD FidelityFX for PC (the folder with its
     /// upscaler DLL), which replaces a title's console build.
     pub fidelityfx_dir: Option<PathBuf>,
+    /// Preferred upscaler for the native Graphics settings.
+    pub graphics_upscaler: GraphicsUpscaler,
     /// The config file that was read, if any.
     pub source: Option<PathBuf>,
 }
@@ -34,6 +36,23 @@ pub struct Config {
 struct FileConfig {
     #[serde(default)]
     paths: FilePaths,
+    #[serde(default)]
+    graphics: FileGraphics,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileGraphics {
+    #[serde(default)]
+    upscaler: GraphicsUpscaler,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphicsUpscaler {
+    #[default]
+    TitleDefault,
+    AmdFsr,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,7 +93,9 @@ impl Config {
             }
             None => (None, FileConfig::default()),
         };
-        Self::resolve(parsed.paths, source, |k| std::env::var_os(k))
+        let mut config = Self::resolve(parsed.paths, source, |k| std::env::var_os(k))?;
+        config.graphics_upscaler = parsed.graphics.upscaler;
+        Ok(config)
     }
 
     fn resolve(
@@ -101,6 +122,7 @@ impl Config {
             data_dir,
             test_titles,
             fidelityfx_dir: env_path("VICTORY_FIDELITYFX_DIR").or(file.fidelityfx_dir),
+            graphics_upscaler: GraphicsUpscaler::default(),
             source,
         })
     }
@@ -217,6 +239,13 @@ mod tests {
         let text = include_str!("../../../victory.example.toml");
         let parsed: FileConfig = toml::from_str(text).unwrap();
         assert!(parsed.paths.game_dir.is_some());
+        assert_eq!(parsed.graphics.upscaler, GraphicsUpscaler::TitleDefault);
+    }
+
+    #[test]
+    fn graphics_upscaler_can_select_amd_fsr() {
+        let parsed: FileConfig = toml::from_str("[graphics]\nupscaler = 'amd_fsr'").unwrap();
+        assert_eq!(parsed.graphics.upscaler, GraphicsUpscaler::AmdFsr);
     }
 
     #[test]

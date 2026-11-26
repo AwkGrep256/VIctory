@@ -2,7 +2,7 @@ use victory_loader::LoadedImage;
 
 /// The rva of the one match of `pattern` in the image's executable sections.
 /// None, said why, for no match or several.
-pub(super) fn find_once(image: &LoadedImage, what: &str, pattern: &str) -> Option<usize> {
+pub(crate) fn find_once(image: &LoadedImage, what: &str, pattern: &str) -> Option<usize> {
     const DISCARDABLE: u32 = 0x0200_0000;
     const EXECUTE: u32 = 0x2000_0000;
     const READ: u32 = 0x4000_0000;
@@ -52,7 +52,7 @@ pub(super) fn find_once(image: &LoadedImage, what: &str, pattern: &str) -> Optio
 }
 
 /// A pattern of hex bytes and `??` (any byte), space-separated.
-pub(super) fn parse_pattern(pattern: &str) -> Vec<Option<u8>> {
+pub(crate) fn parse_pattern(pattern: &str) -> Vec<Option<u8>> {
     pattern
         .split_whitespace()
         .map(|b| (b != "??").then(|| u8::from_str_radix(b, 16).expect("a hex byte or ??")))
@@ -60,7 +60,7 @@ pub(super) fn parse_pattern(pattern: &str) -> Vec<Option<u8>> {
 }
 
 /// The offsets in `code` where `pattern` matches.
-fn matches(code: &[u8], pattern: &[Option<u8>]) -> Vec<usize> {
+pub(crate) fn matches(code: &[u8], pattern: &[Option<u8>]) -> Vec<usize> {
     // Look for its longest fixed run, then check the rest around each hit.
     let (anchor_at, anchor) = longest_fixed_run(pattern);
     memchr::memmem::find_iter(code, &anchor)
@@ -78,7 +78,7 @@ fn matches(code: &[u8], pattern: &[Option<u8>]) -> Vec<usize> {
 }
 
 /// Where the longest run of fixed bytes in `pattern` starts, and its bytes.
-fn longest_fixed_run(pattern: &[Option<u8>]) -> (usize, Vec<u8>) {
+pub(crate) fn longest_fixed_run(pattern: &[Option<u8>]) -> (usize, Vec<u8>) {
     let (mut best, mut start) = ((0, 0), 0);
     for (i, p) in pattern.iter().enumerate() {
         if p.is_none() {
