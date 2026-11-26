@@ -48,6 +48,8 @@ impl UpscalingSection {
         let group = find_once(image, "native settings group", GROUP_ENTRY)?;
         let button = find_once(image, "native settings button", BUTTON_ENTRY)?;
         let list = NativeList::locate(image)?;
+        // Before Settings first opens: its text map is noticed as it loads.
+        super::menu_text::watch();
         // SAFETY: both entries and their native calling conventions were
         // checked. The mapped title lives for the duration of the process.
         Some(unsafe {

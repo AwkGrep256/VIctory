@@ -90,61 +90,70 @@ fn menu_map() -> Option<Map> {
     {
         return Some(map);
     }
+    // The menu thread never searches memory. The map is loaded from a file
+    // when Settings opens, and the file reader notes where its type word
+    // landed (see `watch`): checking those few spots takes microseconds. A
+    // miss usually means "not loaded yet" and the next visit looks again.
+    // After repeated misses (a build that keeps the map elsewhere), a
+    // read-only search runs on a background thread and leaves its result in
+    // `MAP` for a later visit.
     let started = std::time::Instant::now();
-    // The map arrives in a file read shortly after Settings opens, so a miss
-    // usually means "not loaded yet": the next visit looks again for a few
-    // microseconds. Only repeated misses (a build that keeps it elsewhere)
-    // pay for the memory search.
-    let (map, from) = match in_recent_reads() {
-        Some(map) => (Some(map), "recent file reads"),
-        None if MISSES.fetch_add(1, Ordering::AcqRel) + 1 < MISSES_BEFORE_SEARCH => {
-            (None, "recent file reads (not loaded yet)")
-        }
-        None => (scan(), "memory search"),
-    };
-    if map.is_some() {
-        MISSES.store(0, Ordering::Release);
+    let map = in_loaded_data();
+    if map.is_none() && MISSES.fetch_add(1, Ordering::AcqRel) + 1 >= MISSES_BEFORE_SEARCH {
+        search_in_background();
     }
     tracing::info!(target: "menu_trace", us = started.elapsed().as_micros() as u64, found = map.is_some(),
-                   from, "menu text map discovery");
+                   "menu text map discovery");
     let map = map?;
+    MISSES.store(0, Ordering::Release);
     MAP.store(map.at, Ordering::Release);
     Some(map)
 }
 
-/// The map, if it lies in a buffer the title loaded lately: those few
-/// buffers are searched, newest first, instead of all memory. Found by the
-/// same checks as [`scan`], so no address or offset is assumed.
-fn in_recent_reads() -> Option<Map> {
-    let needle = MAP_TYPE.to_le_bytes();
-    // Small: a miss falls back to the full search, which has its own budget.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-    for (at, size) in victory_hle::modules::dstorage::recent_reads::newest_first() {
-        if std::time::Instant::now() > deadline {
-            return None;
-        }
-        let Some(bytes) = read_memory(at, size) else { continue };
-        for hit in memchr::memmem::find_iter(&bytes, &needle) {
-            if (at + hit) % 8 == 0
-                && let Some(map) = (at + hit).checked_sub(0x18).and_then(map_at)
-                && find(map, KNOWN_KEY).is_some()
-            {
-                return Some(map);
-            }
-        }
-    }
-    None
+/// From now on, the title's file reads note where the map's type word
+/// lands. Call before Settings first opens.
+pub(super) fn watch() {
+    victory_hle::modules::dstorage::recent_reads::watch(MAP_TYPE);
 }
 
-/// How long one search may hold the menu thread. A hit takes ~0.2 s; a
-/// search before the map is loaded would sweep all memory (~4.5 s), so it
-/// gives up here and the next menu visit searches again.
-const SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
+/// The map, if one of the spots where loaded data held its type word is a
+/// valid map now. Same checks as [`scan`]: no address or offset assumed.
+fn in_loaded_data() -> Option<Map> {
+    victory_hle::modules::dstorage::recent_reads::hits()
+        .into_iter()
+        .filter_map(|word| word.checked_sub(0x18).and_then(map_at))
+        .find(|&map| find(map, KNOWN_KEY).is_some())
+}
 
+/// Starts one read-only memory search off the menu thread; its result is
+/// checked again before use like any cached map.
+fn search_in_background() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("victory-menu-text-search".into())
+        .spawn(|| {
+            let started = std::time::Instant::now();
+            let map = scan();
+            if let Some(map) = map {
+                MAP.store(map.at, Ordering::Release);
+            }
+            tracing::info!(target: "menu_trace", ms = started.elapsed().as_millis() as u64,
+                           found = map.is_some(), "menu text map background search");
+            STARTED.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        STARTED.store(false, Ordering::Release);
+    }
+}
+
+/// Reads only (through [`read_memory`], which fails instead of faulting),
+/// so it may run on any thread.
 fn scan() -> Option<Map> {
-    let deadline = std::time::Instant::now() + SCAN_BUDGET;
     let mut found = None;
-    each_type_word(Some(deadline), |candidate| {
+    each_type_word(None, |candidate| {
         if let Some(map) = candidate.checked_sub(0x18).and_then(map_at)
             && find(map, KNOWN_KEY).is_some()
         {
@@ -204,43 +213,6 @@ pub(super) fn census(keys: &[u32]) {
                    asked = keys.len(), held = held.len(),
                    found = %format_args!("{:08x?}", held.iter().take(16).collect::<Vec<_>>()),
                    "text census of the Graphics row IDs across all loaded text maps");
-}
-
-/// The map found last, if any (not revalidated).
-pub(super) fn cached_map() -> Option<usize> {
-    Some(MAP.load(Ordering::Acquire)).filter(|&at| at != 0)
-}
-
-/// Diagnostics: logs each 8-aligned word in the title image's mapped memory
-/// that points at `target` or up to `0x1000` bytes before it (a parent
-/// object that embeds it), as `rva` and `delta`. Numbers only: a stable
-/// global would replace the scan with two reads.
-pub(super) fn log_globals(image_base: usize, target: usize) {
-    const BEFORE: usize = 0x1000;
-    // Small: a read across an unreadable page fails as a whole.
-    const CHUNK: usize = 64 << 10;
-    let started = std::time::Instant::now();
-    let size = read_memory(image_base + 0x3c, 4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
-        .and_then(|nt| read_memory(image_base + nt + 0x50, 4))
-        .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
-    let (mut found, mut at) = (0u32, image_base);
-    while at < image_base + size && found < 32 {
-        let len = CHUNK.min(image_base + size - at);
-        if let Some(bytes) = read_memory(at, len) {
-            for (i, word) in bytes.chunks_exact(8).enumerate() {
-                let v = usize::from_le_bytes(word.try_into().unwrap());
-                if v <= target && target - v <= BEFORE {
-                    tracing::info!(target: "menu_trace", rva = %format_args!("{:#x}", at + i * 8 - image_base),
-                                   delta = %format_args!("{:#x}", target - v), "text map global");
-                    found += 1;
-                }
-            }
-        }
-        at += len;
-    }
-    tracing::info!(target: "menu_trace", ms = started.elapsed().as_millis() as u64, size, found,
-                   "text map global probe done");
 }
 
 /// The map whose object is at `at`, if its fields are consistent.

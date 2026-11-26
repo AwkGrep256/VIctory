@@ -459,6 +459,9 @@ fn work(scheduler: &'static Scheduler) {
         drop(lanes);
         let started = std::time::Instant::now();
         let result = execute(&job.request);
+        if result.is_ok() {
+            recent_reads::landed(&job.request);
+        }
         lanes = scheduler.lock();
         lanes.finish(&job, result);
         lanes.count(&job, started);
@@ -846,35 +849,68 @@ extern "system" fn close(this: QueueRef) {
     close_lane(unsafe { &*this }.state.id);
 }
 
-/// The latest plain reads (address destinations, no texture unpacking), so
-/// data the title loaded can be found in a few buffers instead of all of
-/// its memory.
+/// Watches loaded data for one 4-byte word (such as a reflected type hash),
+/// so a structure the title loads from a file is known the moment its read
+/// lands, on the reading thread, instead of being searched for later.
 pub mod recent_reads {
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Reads kept, newest last.
-    const KEPT: usize = 512;
+    use super::{BCPACK, PAGE_DESTINATION, Request};
+
+    /// Hits kept, newest last: only words found, so loads never push a
+    /// rare structure out.
+    const KEPT: usize = 256;
     /// Larger reads are bulk data (models, audio), not small tables.
     const MAX_SIZE: usize = 16 << 20;
+    /// Bit 32 set: watching the low 32 bits.
+    static WATCHED: AtomicU64 = AtomicU64::new(0);
+    static HITS: Mutex<VecDeque<usize>> = Mutex::new(VecDeque::new());
 
-    static READS: Mutex<VecDeque<(usize, usize)>> = Mutex::new(VecDeque::new());
-
-    pub(super) fn note(at: usize, size: usize) {
-        if size == 0 || size > MAX_SIZE {
-            return;
-        }
-        let mut reads = READS.lock().unwrap_or_else(|e| e.into_inner());
-        if reads.len() == KEPT {
-            reads.pop_front();
-        }
-        reads.push_back((at, size));
+    /// From now on, every plain read that lands is checked for `word` at
+    /// 8-aligned addresses.
+    pub fn watch(word: u32) {
+        WATCHED.store(1 << 32 | u64::from(word), Ordering::Release);
     }
 
-    /// `(address, size)` of the kept reads, newest first.
-    pub fn newest_first() -> Vec<(usize, usize)> {
-        let reads = READS.lock().unwrap_or_else(|e| e.into_inner());
-        reads.iter().rev().copied().collect()
+    /// Addresses of the watched word in loaded data, newest first. The data
+    /// may have changed since: check before use.
+    pub fn hits() -> Vec<usize> {
+        let hits = HITS.lock().unwrap_or_else(|e| e.into_inner());
+        hits.iter().rev().copied().collect()
+    }
+
+    /// A read completed successfully.
+    pub(super) fn landed(request: &Request) {
+        let watched = WATCHED.load(Ordering::Acquire);
+        let size = request.destination_size as usize;
+        if watched == 0
+            || request.options & (PAGE_DESTINATION | BCPACK) != 0
+            || size == 0
+            || size > MAX_SIZE
+        {
+            return;
+        }
+        let at = request.destination as usize;
+        // SAFETY: a plain read just wrote `destination_size` bytes there on
+        // this thread; the title gets the completion only after this.
+        let bytes = unsafe { std::slice::from_raw_parts(at as *const u8, size) };
+        let needle = (watched as u32).to_le_bytes();
+        let found: Vec<usize> = memchr::memmem::find_iter(bytes, &needle)
+            .map(|hit| at + hit)
+            .filter(|addr| addr % 8 == 0)
+            .collect();
+        if found.is_empty() {
+            return;
+        }
+        let mut hits = HITS.lock().unwrap_or_else(|e| e.into_inner());
+        for addr in found {
+            if hits.len() == KEPT {
+                hits.pop_front();
+            }
+            hits.push_back(addr);
+        }
     }
 }
 
@@ -900,9 +936,6 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
     }
     if request.source.is_null() || request.destination.is_null() {
         return Err(fail(E_INVALIDARG, "no source or destination"));
-    }
-    if options & (PAGE_DESTINATION | BCPACK) == 0 {
-        recent_reads::note(request.destination as usize, request.destination_size as usize);
     }
     // Diagnostics (off unless `dstorage_dest=debug`): where each read lands,
     // to tell which loaded file holds a structure found in memory.
