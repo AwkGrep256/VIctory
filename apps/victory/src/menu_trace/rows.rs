@@ -144,7 +144,11 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
         && let Some(owner) = context.as_deref().and_then(|bytes| usize_at(bytes, 0x18))
         && owner != 0
     {
-        if !CENSUS.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        // The census sweeps every loaded text map: diagnostics only, it
+        // stalls the menu thread while Settings opens.
+        if victory_gpu::switch::on("VICTORY_MENU_TEXT_CENSUS")
+            && !CENSUS.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             let mut keys = GRAPHICS_TEXT.with_borrow(Clone::clone);
             keys.sort_unstable();
             keys.dedup();

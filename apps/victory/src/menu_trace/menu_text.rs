@@ -86,7 +86,11 @@ fn menu_map() -> Option<Map> {
     {
         return Some(map);
     }
-    let map = scan()?;
+    let started = std::time::Instant::now();
+    let map = scan();
+    tracing::info!(target: "menu_trace", ms = started.elapsed().as_millis() as u64, found = map.is_some(),
+                   "menu text map discovery");
+    let map = map?;
     MAP.store(map.at, Ordering::Release);
     Some(map)
 }
@@ -131,6 +135,7 @@ fn each_type_word(mut visit: impl FnMut(usize) -> bool) {
 /// Logs how many of `keys` any loaded text map of the menu's type holds,
 /// across every such map: to tell missing text from text kept elsewhere.
 pub(super) fn census(keys: &[u32]) {
+    let started = std::time::Instant::now();
     let (mut maps, mut records) = (0u32, 0u64);
     let mut held = std::collections::BTreeSet::new();
     let (mut known, mut tab_control) = (false, false);
@@ -144,7 +149,7 @@ pub(super) fn census(keys: &[u32]) {
         }
         true
     });
-    tracing::info!(target: "menu_trace", maps, records, video_control = known, video_tab_id = tab_control,
+    tracing::info!(target: "menu_trace", ms = started.elapsed().as_millis() as u64, maps, records, video_control = known, video_tab_id = tab_control,
                    asked = keys.len(), held = held.len(),
                    found = %format_args!("{:08x?}", held.iter().take(16).collect::<Vec<_>>()),
                    "text census of the Graphics row IDs across all loaded text maps");
