@@ -10,11 +10,11 @@ use victory_core::settings::graphics::{GRAPHICS_TAB, UPSCALING_GROUP};
 use victory_loader::LoadedImage;
 
 use super::native_list::NativeList;
-use super::settings_list::{ListSetting, UPSCALER};
+use super::settings_list::{ALL, ListSetting};
 use crate::title_pattern::find_once;
 
-/// The rows of the section, in order.
-const ROWS: [&ListSetting; 1] = [&UPSCALER];
+/// The rows of the section, in order: every list setting.
+const ROWS: &[&ListSetting] = &ALL;
 
 // Native helpers the title itself uses for programmatically added rows.
 const GROUP_ENTRY: &str = "56 57 53 48 83 EC 20 48 85 D2 74 0B 48 89 D0 8B 12 \
@@ -94,9 +94,18 @@ impl UpscalingSection {
         for setting in ROWS {
             // SAFETY: the helper allocates a pooled row and appends it to
             // this group; the action ID is empty and runs nothing.
+            // SAFETY: a live group starts with {cap: u32, count: u32, rows}.
+            let before = unsafe { std::ptr::read_unaligned((group + 4) as *const u32) };
+            // SAFETY: as above; the helper appends a pooled row and runs nothing.
             unsafe { (self.button)(group, 0, 0, setting.name().id(), setting.help().id()) };
+            // SAFETY: as above.
+            let after = unsafe { std::ptr::read_unaligned((group + 4) as *const u32) };
+            if after != before.wrapping_add(1) {
+                tracing::warn!(target: "menu_trace", before, after, "row not appended, not adopted");
+                continue;
+            }
             // SAFETY: a live group whose last row was just appended.
-            if let Some(row) = unsafe { last_row(group) } {
+            if let Some(row) = unsafe { last_row(group) }.filter(|&row| row != 0) {
                 // SAFETY: a pooled settings row, just appended, not shown.
                 unsafe { self.list.adopt(row, setting) };
             }

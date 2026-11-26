@@ -115,20 +115,29 @@ impl NativeList {
         let at = base + case;
         // SAFETY: the pattern matched these instructions; each rel32 is read
         // from inside the matched bytes.
-        let (defaults, table, second, third) = unsafe {
+        let (defaults, table, second, third, side) = unsafe {
             (
                 rel(at, 15, 19),
                 rel(at, 22, 26),
                 rel(at, 32, 36),
                 rel(at, 43, 47),
+                rel(at, 54, 58),
             )
         };
-        // SAFETY: `table` is the quality list's 12-entry function table in
-        // the mapped image; `defaults` its 16 default bytes.
+        // Our copy serves the commit side from its slot 10: only valid if the
+        // title's commit-side table is the primary table's slot 10, and all
+        // we read lies inside the image.
+        let end = base + image.info().size_of_image as usize;
+        if side != table + slot::COMMIT_SIDE * 8 || table < base || table + 12 * 8 > end || defaults + 16 > end {
+            eprintln!("VIctory: native list rows not installed: the list row tables have another layout");
+            return None;
+        }
+        // SAFETY: checked just above: the quality list's 12-entry function
+        // table and its 16 default bytes, inside the mapped image.
         let (mut copy, defaults) = unsafe {
             (
-                std::ptr::read(table as *const [usize; 12]),
-                std::ptr::read(defaults as *const [u8; 16]),
+                std::ptr::read_unaligned(table as *const [usize; 12]),
+                std::ptr::read_unaligned(defaults as *const [u8; 16]),
             )
         };
         copy[slot::REFRESH] = refresh as *const () as usize;
@@ -292,10 +301,9 @@ extern "win64" fn commit(side: usize) {
     // SAFETY: live row, menu thread.
     let raw = unsafe { get_i32(row, field::VALUE) };
     tracing::debug!(target: "menu_trace", row = %format_args!("{row:#x}"), raw, "list row commit");
-    if let Some(index) = bound.setting.choose(raw)
-        && let Err(e) = bound.setting.save()
-    {
-        tracing::warn!(target: "menu_trace", index, error = %e, "could not save the menu choice");
+    if let Err(e) = bound.setting.choose(raw) {
+        // The old choice stays; the row shows it again on the next publish.
+        tracing::warn!(target: "menu_trace", raw, error = %e, "menu choice not saved, kept the old one");
     }
     if let Some(notify) = NATIVE.get().and_then(|n| n.notify) {
         // SAFETY: live row; the title's notifier takes the row's setting

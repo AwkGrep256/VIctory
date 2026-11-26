@@ -53,9 +53,35 @@ pub fn save<C: Choice>(path: &Path, value: C) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let new = with_value(&old, C::CONFIG, name);
-    let temp = path.with_extension("toml.tmp");
+    check_edit(&old, &new, C::CONFIG, name)
+        .with_context(|| format!("not changing {}: the edit would not be clean", path.display()))?;
+    let temp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
     std::fs::write(&temp, new).with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))
+    std::fs::rename(&temp, path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp);
+        })
+        .with_context(|| format!("replacing {}", path.display()))
+}
+
+/// The line edit is only trusted if, read as TOML, `new` is `old` with just
+/// `[section] key` set to `value`. Inline tables, dotted or quoted keys and
+/// the like are refused rather than mangled.
+fn check_edit(old: &str, new: &str, at: ConfigKey, value: &str) -> Result<()> {
+    let mut old: toml::Table = toml::from_str(old).context("the config file is not valid TOML")?;
+    let mut new: toml::Table = toml::from_str(new).context("the edited file is not valid TOML")?;
+    let got = new.get(at.section).and_then(|s| s.get(at.key)).and_then(|v| v.as_str());
+    anyhow::ensure!(got == Some(value), "`{}.{}` did not come out as `{value}`", at.section, at.key);
+    for table in [&mut old, &mut new] {
+        if let Some(section) = table.get_mut(at.section).and_then(|s| s.as_table_mut()) {
+            section.remove(at.key);
+            if section.is_empty() {
+                table.remove(at.section);
+            }
+        }
+    }
+    anyhow::ensure!(old == new, "other values would change");
+    Ok(())
 }
 
 /// The section a header line opens (`[graphics]` → `graphics`).
@@ -187,6 +213,38 @@ mod tests {
             with_value(doc, AT, "amd_fsr"),
             "[graphics]\r\nupscaler = 'amd_fsr'\r\n"
         );
+    }
+
+    #[test]
+    fn an_inline_table_is_refused_not_mangled() {
+        let doc = "graphics = { upscaler = 'title_default' }\n";
+        let new = with_value(doc, AT, "amd_fsr");
+        assert!(check_edit(doc, &new, AT, "amd_fsr").is_err());
+    }
+
+    #[test]
+    fn a_dotted_key_is_refused_not_mangled() {
+        let doc = "graphics.upscaler = 'title_default'\n";
+        let new = with_value(doc, AT, "amd_fsr");
+        assert!(check_edit(doc, &new, AT, "amd_fsr").is_err());
+    }
+
+    #[test]
+    fn a_plain_edit_passes_the_check() {
+        let doc = "# c\n[graphics]\nupscaler = 'title_default' # x\n[paths]\ngame_dir = 'D:/g'\n";
+        assert!(check_edit(doc, &with_value(doc, AT, "amd_fsr"), AT, "amd_fsr").is_ok());
+        assert!(check_edit("", &with_value("", AT, "amd_fsr"), AT, "amd_fsr").is_ok());
+    }
+
+    #[test]
+    fn save_leaves_a_refused_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("victory.toml");
+        let doc = "graphics = { upscaler = 'title_default' }\n";
+        std::fs::write(&path, doc).unwrap();
+        assert!(save(&path, crate::config::GraphicsUpscaler::AmdFsr).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), doc);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temp file left");
     }
 
     #[test]

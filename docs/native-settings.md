@@ -10,8 +10,8 @@ the pieces fit and how to add or change a setting.
 |---|---|---|
 | `crates/victory-core/src/settings/` | The settings themselves: enums, labels, `victory.toml` spelling, checks, saving | No (pure, unit-tested) |
 | `apps/victory/src/menu_trace/settings_list.rs` | The settings as the menu sees them: current choice, range, save | No (unit-tested) |
-| `apps/victory/src/menu_trace/upscaling.rs` | The Upscaling section: heading and the rows it holds | Calls two title helpers |
-| `apps/victory/src/menu_trace/native_list.rs` | Turns a title row into a native ◀ ▶ row for one setting | Yes: the only place |
+| `apps/victory/src/menu_trace/upscaling.rs` | The Upscaling section: heading and the rows it holds | Yes: calls two title helpers, reads the group's row list |
+| `apps/victory/src/menu_trace/native_list.rs` | Turns a title row into a native ◀ ▶ row for one setting | Yes: rewrites title rows |
 
 A setting is a **fieldless enum** with one `Choice` impl. Everything else
 (the row's option count, its labels, reading the value at startup, writing it
@@ -115,8 +115,13 @@ Settings apply after a restart: the menu only changes the saved value.
 `assert_matches_serde::<T>()` refuses an option spelled differently from what
 `victory.toml` loads, so a value saved from the menu always loads again.
 
-`Text::own` refuses keys that do not start with `victory_` **at compile
-time**, so VIctory's labels can never overwrite the title's own.
+`Text::own` refuses keys that do not start with `victory_` (at compile time
+in a `const`). That keeps our keys apart from the title's by name; a 32-bit
+hash can still collide, which the tests check among our own IDs.
+
+Saving refuses a `victory.toml` it cannot edit cleanly (an inline
+`graphics = { ... }` table, dotted keys): the edited text is parsed and
+compared first. A failed save keeps the old choice.
 
 ## Saving
 

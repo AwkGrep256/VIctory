@@ -23,8 +23,9 @@ pub const fn joaat(key: &str) -> u32 {
     hash.wrapping_add(hash << 15)
 }
 
-/// Prefix of every text key VIctory owns, so our IDs never land on the
-/// title's own labels.
+/// Prefix of every text key VIctory owns: a naming rule that keeps our keys
+/// apart from the title's. It cannot rule out a 32-bit hash collision; the
+/// settings tests check our IDs against each other.
 pub const OWN_PREFIX: &str = "victory_";
 
 /// One label in the title's menu: the ID it is looked up by and the English

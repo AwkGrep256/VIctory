@@ -16,8 +16,8 @@ use victory_core::settings::{Choice, Text, file};
 /// Settings → Graphics → Upscaling → Upscaler.
 pub(super) static UPSCALER: ListSetting = ListSetting::of::<GraphicsUpscaler>();
 
-/// Every list setting, to load them all at startup.
-static ALL: [&ListSetting; 1] = [&UPSCALER];
+/// Every list setting, in menu order: loaded at startup and shown as rows.
+pub(super) static ALL: [&ListSetting; 1] = [&UPSCALER];
 
 /// The config file choices are saved to.
 static CONFIG_FILE: OnceLock<PathBuf> = OnceLock::new();
@@ -63,19 +63,24 @@ impl ListSetting {
         self.chosen.load(Ordering::Relaxed)
     }
 
-    /// Takes the row's raw value: clamps it to the options, keeps it, and
-    /// returns the index if it changed.
-    pub(super) fn choose(&self, raw: i32) -> Option<usize> {
-        let index = usize::try_from(raw).unwrap_or(0).min(self.last());
-        (self.chosen.swap(index, Ordering::Relaxed) != index).then_some(index)
+    /// The option the row's raw value stands for (clamped to the options).
+    pub(super) fn index_of(&self, raw: i32) -> usize {
+        usize::try_from(raw).unwrap_or(0).min(self.last())
     }
 
-    /// Writes the chosen option to the config file, if one is known.
-    pub(super) fn save(&self) -> anyhow::Result<()> {
-        match CONFIG_FILE.get() {
-            Some(path) => (self.save)(path, self.chosen()),
-            None => Ok(()),
+    /// Takes the player's pick: saves it first and only then makes it the
+    /// choice, so a failed save keeps the old choice and can be retried.
+    /// Returns the new index if it changed.
+    pub(super) fn choose(&self, raw: i32) -> anyhow::Result<Option<usize>> {
+        let index = self.index_of(raw);
+        if index == self.chosen() {
+            return Ok(None);
         }
+        if let Some(path) = CONFIG_FILE.get() {
+            (self.save)(path, index)?;
+        }
+        self.chosen.store(index, Ordering::Relaxed);
+        Ok(Some(index))
     }
 
     fn load(&self, config: &Config) {
@@ -94,11 +99,12 @@ fn save_index<C: Choice>(path: &Path, index: usize) -> anyhow::Result<()> {
 
 /// Loads every setting's choice from `config` and remembers where to save.
 pub(super) fn load(config: &Config) {
+    // Absolute now: the title can change the working directory later.
     let path = config
         .source
         .clone()
         .unwrap_or_else(|| PathBuf::from("victory.toml"));
-    let _ = CONFIG_FILE.set(path);
+    let _ = CONFIG_FILE.set(std::path::absolute(&path).unwrap_or(path));
     for setting in ALL {
         setting.load(config);
     }
@@ -147,16 +153,16 @@ mod tests {
     #[test]
     fn choose_keeps_a_valid_index_and_reports_the_change() {
         let s = fresh();
-        assert_eq!(s.choose(1), Some(1));
+        assert_eq!(s.choose(1).unwrap(), Some(1));
         assert_eq!(s.chosen(), 1);
-        assert_eq!(s.choose(1), None, "no change, nothing to save");
+        assert_eq!(s.choose(1).unwrap(), None, "no change, nothing to save");
     }
 
     #[test]
     fn choose_clamps_out_of_range_values() {
         let s = fresh();
-        assert_eq!(s.choose(99), Some(s.last()));
-        assert_eq!(s.choose(-5), Some(0));
+        assert_eq!(s.index_of(99), s.last());
+        assert_eq!(s.index_of(-5), 0);
     }
 
     #[test]
@@ -176,8 +182,7 @@ mod tests {
         let path = dir.path().join("victory.toml");
         std::fs::write(&path, "# mine\n[graphics]\nupscaler = 'title_default'\n").unwrap();
         let s = fresh();
-        s.choose(GraphicsUpscaler::AmdFsr.index().unwrap() as i32);
-        (s.save)(&path, s.chosen()).unwrap();
+        (s.save)(&path, GraphicsUpscaler::AmdFsr.index().unwrap()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "# mine\n[graphics]\nupscaler = 'amd_fsr'\n"
