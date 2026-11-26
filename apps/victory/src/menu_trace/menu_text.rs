@@ -34,6 +34,10 @@ const SCAN_END: usize = 0xf_0000_0000;
 
 /// The map found last, checked again before each use.
 static MAP: AtomicUsize = AtomicUsize::new(0);
+/// Lookups in a row that found nothing in the recent file reads.
+static MISSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Misses before the slow memory search is tried.
+const MISSES_BEFORE_SEARCH: u32 = 3;
 
 #[derive(Clone, Copy)]
 struct Map {
@@ -87,12 +91,49 @@ fn menu_map() -> Option<Map> {
         return Some(map);
     }
     let started = std::time::Instant::now();
-    let map = scan();
-    tracing::info!(target: "menu_trace", ms = started.elapsed().as_millis() as u64, found = map.is_some(),
-                   "menu text map discovery");
+    // The map arrives in a file read shortly after Settings opens, so a miss
+    // usually means "not loaded yet": the next visit looks again for a few
+    // microseconds. Only repeated misses (a build that keeps it elsewhere)
+    // pay for the memory search.
+    let (map, from) = match in_recent_reads() {
+        Some(map) => (Some(map), "recent file reads"),
+        None if MISSES.fetch_add(1, Ordering::AcqRel) + 1 < MISSES_BEFORE_SEARCH => {
+            (None, "recent file reads (not loaded yet)")
+        }
+        None => (scan(), "memory search"),
+    };
+    if map.is_some() {
+        MISSES.store(0, Ordering::Release);
+    }
+    tracing::info!(target: "menu_trace", us = started.elapsed().as_micros() as u64, found = map.is_some(),
+                   from, "menu text map discovery");
     let map = map?;
     MAP.store(map.at, Ordering::Release);
     Some(map)
+}
+
+/// The map, if it lies in a buffer the title loaded lately: those few
+/// buffers are searched, newest first, instead of all memory. Found by the
+/// same checks as [`scan`], so no address or offset is assumed.
+fn in_recent_reads() -> Option<Map> {
+    let needle = MAP_TYPE.to_le_bytes();
+    // Small: a miss falls back to the full search, which has its own budget.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    for (at, size) in victory_hle::modules::dstorage::recent_reads::newest_first() {
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        let Some(bytes) = read_memory(at, size) else { continue };
+        for hit in memchr::memmem::find_iter(&bytes, &needle) {
+            if (at + hit) % 8 == 0
+                && let Some(map) = (at + hit).checked_sub(0x18).and_then(map_at)
+                && find(map, KNOWN_KEY).is_some()
+            {
+                return Some(map);
+            }
+        }
+    }
+    None
 }
 
 /// How long one search may hold the menu thread. A hit takes ~0.2 s; a

@@ -846,6 +846,38 @@ extern "system" fn close(this: QueueRef) {
     close_lane(unsafe { &*this }.state.id);
 }
 
+/// The latest plain reads (address destinations, no texture unpacking), so
+/// data the title loaded can be found in a few buffers instead of all of
+/// its memory.
+pub mod recent_reads {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// Reads kept, newest last.
+    const KEPT: usize = 512;
+    /// Larger reads are bulk data (models, audio), not small tables.
+    const MAX_SIZE: usize = 16 << 20;
+
+    static READS: Mutex<VecDeque<(usize, usize)>> = Mutex::new(VecDeque::new());
+
+    pub(super) fn note(at: usize, size: usize) {
+        if size == 0 || size > MAX_SIZE {
+            return;
+        }
+        let mut reads = READS.lock().unwrap_or_else(|e| e.into_inner());
+        if reads.len() == KEPT {
+            reads.pop_front();
+        }
+        reads.push_back((at, size));
+    }
+
+    /// `(address, size)` of the kept reads, newest first.
+    pub fn newest_first() -> Vec<(usize, usize)> {
+        let reads = READS.lock().unwrap_or_else(|e| e.into_inner());
+        reads.iter().rev().copied().collect()
+    }
+}
+
 /// Reads, inflates and/or unpacks, and writes one request.
 fn execute(request: &Request) -> Result<(), HRESULT> {
     let options = request.options;
@@ -869,6 +901,20 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
     if request.source.is_null() || request.destination.is_null() {
         return Err(fail(E_INVALIDARG, "no source or destination"));
     }
+    if options & (PAGE_DESTINATION | BCPACK) == 0 {
+        recent_reads::note(request.destination as usize, request.destination_size as usize);
+    }
+    // Diagnostics (off unless `dstorage_dest=debug`): where each read lands,
+    // to tell which loaded file holds a structure found in memory.
+    tracing::debug!(
+        target: "dstorage_dest",
+        destination = format_args!("{:#x}", request.destination as usize),
+        size = request.destination_size,
+        offset = request.offset,
+        options = format_args!("{options:#x}"),
+        name = text(request.name),
+        "dstorage: read"
+    );
     let bc = ((options & BCPACK) >> 1) as u8;
     let size = request.destination_size as usize;
     if options & (ZLIB | BCPACK) == 0 {
