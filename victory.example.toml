@@ -28,3 +28,4 @@ test_titles = []
 # The VICTORY_UPSCALER and VICTORY_FFX_SCALE diagnostics override this choice.
 # [graphics]
 # upscaler = 'amd_fsr'  # or 'title_default'
+# frame_generation = 'amd_fsr'  # or 'off' (saved only: not applied in this build yet)

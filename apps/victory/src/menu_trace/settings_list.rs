@@ -10,14 +10,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use victory_core::Config;
-use victory_core::config::GraphicsUpscaler;
+use victory_core::config::{FrameGeneration, GraphicsUpscaler};
 use victory_core::settings::{Choice, Text, file};
 
 /// Settings → Graphics → Upscaling → Upscaler.
 pub(super) static UPSCALER: ListSetting = ListSetting::of::<GraphicsUpscaler>();
 
+/// Settings → Graphics → Upscaling → Frame generation.
+pub(super) static FRAME_GENERATION: ListSetting = ListSetting::of::<FrameGeneration>();
+
 /// Every list setting, in menu order: loaded at startup and shown as rows.
-pub(super) static ALL: [&ListSetting; 1] = [&UPSCALER];
+pub(super) static ALL: [&ListSetting; 2] = [&UPSCALER, &FRAME_GENERATION];
 
 /// The config file choices are saved to.
 static CONFIG_FILE: OnceLock<PathBuf> = OnceLock::new();

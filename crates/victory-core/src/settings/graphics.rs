@@ -6,7 +6,7 @@
 
 use super::choice::{Choice, ConfigKey, Opt};
 use super::text::Text;
-use crate::config::GraphicsUpscaler;
+use crate::config::{FrameGeneration, GraphicsUpscaler};
 
 /// The hidden tab's name in the tab bar. A tab shows the text of its
 /// section's *screen* ID (Display's "Video" is keyed by its screen
@@ -43,6 +43,34 @@ impl Choice for GraphicsUpscaler {
 
     fn from_config(config: &crate::Config) -> Self {
         config.graphics_upscaler
+    }
+}
+
+impl Choice for FrameGeneration {
+    const CONFIG: ConfigKey = ConfigKey {
+        section: "graphics",
+        key: "frame_generation",
+    };
+    const NAME: Text = Text::own("victory_frame_generation", "Frame generation");
+    const HELP: Text = Text::own(
+        "victory_frame_generation_desc",
+        "Inserts generated frames between rendered ones for smoother motion.          Applies after a restart.",
+    );
+    const OPTIONS: &'static [Opt<Self>] = &[
+        Opt {
+            value: FrameGeneration::Off,
+            label: Text::own("victory_frame_generation_off", "Off"),
+            toml: "off",
+        },
+        Opt {
+            value: FrameGeneration::AmdFsr,
+            label: Text::own("victory_frame_generation_amd_fsr", "AMD FSR"),
+            toml: "amd_fsr",
+        },
+    ];
+
+    fn from_config(config: &crate::Config) -> Self {
+        config.frame_generation
     }
 }
 
@@ -86,6 +114,24 @@ mod tests {
     }
 
     #[test]
+    fn frame_generation_is_well_formed() {
+        assert_eq!(validate::<FrameGeneration>(), Ok(()));
+    }
+
+    #[test]
+    fn frame_generation_spellings_load_back() {
+        assert_matches_serde::<FrameGeneration>();
+    }
+
+    #[test]
+    fn frame_generation_lists_every_variant() {
+        let all = |v: FrameGeneration| match v {
+            FrameGeneration::Off | FrameGeneration::AmdFsr => v.index().is_some(),
+        };
+        assert!(all(FrameGeneration::Off) && all(FrameGeneration::AmdFsr));
+    }
+
+    #[test]
     fn graphics_tab_uses_the_screen_id() {
         // The screen the Graphics section is registered with (menu_trace.rs).
         assert_eq!(GRAPHICS_TAB.id(), 0x9a46_cdb1);
@@ -98,9 +144,12 @@ mod tests {
             UPSCALING_GROUP,
             GraphicsUpscaler::NAME,
             GraphicsUpscaler::HELP,
+            FrameGeneration::NAME,
+            FrameGeneration::HELP,
         ]
         .iter()
         .chain(GraphicsUpscaler::OPTIONS.iter().map(|o| &o.label))
+        .chain(FrameGeneration::OPTIONS.iter().map(|o| &o.label))
         .map(|t| t.id())
         .collect();
         let count = ids.len();
