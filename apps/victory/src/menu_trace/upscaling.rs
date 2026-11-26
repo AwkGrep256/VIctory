@@ -65,6 +65,13 @@ impl UpscalingSection {
     pub(super) fn texts() -> Vec<Text> {
         let mut texts = vec![GRAPHICS_TAB, UPSCALING_GROUP];
         texts.extend(ROWS.iter().flat_map(|s| [s.name(), s.help()]));
+        // The stock Graphics rows' names, blank in this build otherwise.
+        let locale = std::env::var("VICTORY_LOCALE").unwrap_or_default();
+        texts.extend(
+            victory_core::settings::stock_labels::for_locale(&locale)
+                .iter()
+                .flat_map(|label| label.texts()),
+        );
         texts
     }
 

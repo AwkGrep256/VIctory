@@ -14,6 +14,7 @@
 pub mod choice;
 pub mod file;
 pub mod graphics;
+pub mod stock_labels;
 pub mod text;
 
 pub use choice::{Choice, ConfigKey, Opt, SettingError, validate};
