@@ -95,9 +95,15 @@ fn menu_map() -> Option<Map> {
     Some(map)
 }
 
+/// How long one search may hold the menu thread. A hit takes ~0.2 s; a
+/// search before the map is loaded would sweep all memory (~4.5 s), so it
+/// gives up here and the next menu visit searches again.
+const SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
+
 fn scan() -> Option<Map> {
+    let deadline = std::time::Instant::now() + SCAN_BUDGET;
     let mut found = None;
-    each_type_word(|candidate| {
+    each_type_word(Some(deadline), |candidate| {
         if let Some(map) = candidate.checked_sub(0x18).and_then(map_at)
             && find(map, KNOWN_KEY).is_some()
         {
@@ -112,13 +118,17 @@ fn scan() -> Option<Map> {
 /// Calls `visit` with the address of every 8-aligned [`MAP_TYPE`] word in
 /// the title's mapped memory, until it returns false. Reads through
 /// [`read_memory`] in chunks: the title may decommit a region between the
-/// region query and the read, which must skip it, not fault.
-fn each_type_word(mut visit: impl FnMut(usize) -> bool) {
+/// region query and the read, which must skip it, not fault. Stops at
+/// `deadline`, checked before each chunk.
+fn each_type_word(deadline: Option<std::time::Instant>, mut visit: impl FnMut(usize) -> bool) {
     const CHUNK: usize = 4 << 20;
     let needle = MAP_TYPE.to_le_bytes();
     for (start, size) in mapped_regions(SCAN_START, SCAN_END) {
         let mut at = start;
         while at < start + size {
+            if deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                return;
+            }
             let len = CHUNK.min(start + size - at);
             if let Some(bytes) = read_memory(at, len) {
                 for hit in memchr::memmem::find_iter(&bytes, &needle) {
@@ -139,7 +149,7 @@ pub(super) fn census(keys: &[u32]) {
     let (mut maps, mut records) = (0u32, 0u64);
     let mut held = std::collections::BTreeSet::new();
     let (mut known, mut tab_control) = (false, false);
-    each_type_word(|candidate| {
+    each_type_word(None, |candidate| {
         if let Some(map) = candidate.checked_sub(0x18).and_then(map_at) {
             maps += 1;
             records += u64::from(map.count);
@@ -153,6 +163,43 @@ pub(super) fn census(keys: &[u32]) {
                    asked = keys.len(), held = held.len(),
                    found = %format_args!("{:08x?}", held.iter().take(16).collect::<Vec<_>>()),
                    "text census of the Graphics row IDs across all loaded text maps");
+}
+
+/// The map found last, if any (not revalidated).
+pub(super) fn cached_map() -> Option<usize> {
+    Some(MAP.load(Ordering::Acquire)).filter(|&at| at != 0)
+}
+
+/// Diagnostics: logs each 8-aligned word in the title image's mapped memory
+/// that points at `target` or up to `0x1000` bytes before it (a parent
+/// object that embeds it), as `rva` and `delta`. Numbers only: a stable
+/// global would replace the scan with two reads.
+pub(super) fn log_globals(image_base: usize, target: usize) {
+    const BEFORE: usize = 0x1000;
+    // Small: a read across an unreadable page fails as a whole.
+    const CHUNK: usize = 64 << 10;
+    let started = std::time::Instant::now();
+    let size = read_memory(image_base + 0x3c, 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+        .and_then(|nt| read_memory(image_base + nt + 0x50, 4))
+        .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let (mut found, mut at) = (0u32, image_base);
+    while at < image_base + size && found < 32 {
+        let len = CHUNK.min(image_base + size - at);
+        if let Some(bytes) = read_memory(at, len) {
+            for (i, word) in bytes.chunks_exact(8).enumerate() {
+                let v = usize::from_le_bytes(word.try_into().unwrap());
+                if v <= target && target - v <= BEFORE {
+                    tracing::info!(target: "menu_trace", rva = %format_args!("{:#x}", at + i * 8 - image_base),
+                                   delta = %format_args!("{:#x}", target - v), "text map global");
+                    found += 1;
+                }
+            }
+        }
+        at += len;
+    }
+    tracing::info!(target: "menu_trace", ms = started.elapsed().as_millis() as u64, size, found,
+                   "text map global probe done");
 }
 
 /// The map whose object is at `at`, if its fields are consistent.

@@ -45,6 +45,7 @@ struct VisitState {
 
 /// Whether the text census has run.
 static CENSUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PATH_PROBE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
     /// The stock Graphics rows' name and help IDs, gathered during a visit.
@@ -132,6 +133,9 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
     if label == GRAPHICS_LABEL {
         GRAPHICS_TEXT.with_borrow_mut(Vec::clear);
     }
+    // Every visit: the tab bar needs the Graphics name before any tab is
+    // built. The search is time-boxed (see `menu_text`), so a visit before
+    // the text map is loaded costs little and the next one tries again.
     if let Some(probe) = &hooks.upscaling {
         probe.provide_text(hooks.image_base);
     }
@@ -157,6 +161,12 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
         // SAFETY: this is the live menu for the tab being built at the
         // verified call, after the stock row traversal and before flattening.
         unsafe { probe.append(owner) };
+        if victory_gpu::switch::on("VICTORY_MENU_TEXT_PATH_PROBE")
+            && let Some(map) = super::menu_text::cached_map()
+            && !PATH_PROBE.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            super::menu_text::log_globals(hooks.image_base, map);
+        }
     }
     if matches!(current.label, DISPLAY_LABEL | GRAPHICS_LABEL) {
         tracing::info!(target: "menu_trace", tab = %format_args!("{:08x}", current.label),
