@@ -24,7 +24,10 @@ use std::time::Duration;
 use anyhow::Result;
 use victory_loader::{LoadedImage, Redirect};
 
+mod menu_text;
+mod native_list;
 mod rows;
+mod settings_list;
 mod upscaling;
 
 use crate::title_pattern::find_once;
@@ -74,19 +77,23 @@ static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 static CONTROLLER: AtomicUsize = AtomicUsize::new(0);
 /// Whether the Graphics section is added after Display.
 static GRAPHICS_SECTION: AtomicBool = AtomicBool::new(false);
+/// The title image's base, for the menu text table.
+static IMAGE_BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// Sends the section registration's calls to [`on_add_section`] if
 /// `VICTORY_MENU_TRACE` or `VICTORY_MENU_GRAPHICS` is set, and starts the
 /// watcher with the first. Runs before the title's code and before any
 /// diagnostics thread starts. An error means a call was written but its
 /// page protection or instruction cache was not settled.
-pub(crate) fn start(image: &LoadedImage) -> Result<()> {
+pub(crate) fn start(image: &LoadedImage, config: &victory_core::Config) -> Result<()> {
     let trace = victory_gpu::switch::on("VICTORY_MENU_TRACE");
     let graphics = victory_gpu::switch::on("VICTORY_MENU_GRAPHICS");
     if !trace && !graphics {
         return Ok(());
     }
     GRAPHICS_SECTION.store(graphics, Ordering::Release);
+    settings_list::load(config);
+    IMAGE_BASE.store(image.base(), Ordering::Release);
     let Some((calls, callee)) = locate(image) else {
         return Ok(());
     };
@@ -204,6 +211,15 @@ extern "win64" fn on_add_section(
     let added = original(this, label, section, screen, parent);
     if section == DISPLAY && GRAPHICS_SECTION.load(Ordering::Acquire) {
         tracing::info!(target: "menu_trace", controller = %format_args!("{this:#x}"), "graphics section added");
+        // The tab bar is drawn from the sections, before any row is built:
+        // give the tab its text now.
+        // Only into a map already found (no scan here: it stalls the menu
+        // thread, and the map is not loaded before Settings first opens).
+        let tab = victory_core::settings::graphics::GRAPHICS_TAB;
+        menu_text::provide_known(
+            IMAGE_BASE.load(Ordering::Acquire),
+            &[(tab.id(), tab.english())],
+        );
         // The title passes the label by address too; a local lives long enough.
         let label = GRAPHICS_LABEL;
         original(this, &label, GRAPHICS, GRAPHICS_SCREEN, parent);

@@ -9,7 +9,7 @@ use victory_loader::{LoadedImage, Redirect, read_memory};
 use crate::title_pattern::find_once;
 
 use super::GRAPHICS_LABEL;
-use super::upscaling::UpscalingProbe;
+use super::upscaling::UpscalingSection;
 
 const DISPLAY_LABEL: u32 = 0x8cb1_18f1;
 const VISIT_SITE: &str = "48 8D 54 24 40 49 89 73 18 4C 89 1A 4C 89 4A 08 \
@@ -32,7 +32,7 @@ struct Hooks {
     make: Make,
     image_base: usize,
     image_size: usize,
-    upscaling: Option<UpscalingProbe>,
+    upscaling: Option<UpscalingSection>,
 }
 
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
@@ -43,7 +43,12 @@ struct VisitState {
     made: u32,
 }
 
+/// Whether the text census has run.
+static CENSUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 thread_local! {
+    /// The stock Graphics rows' name and help IDs, gathered during a visit.
+    static GRAPHICS_TEXT: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static VISIT: Cell<VisitState> = const { Cell::new(VisitState { label: 0, made: 0 }) };
 }
 
@@ -75,7 +80,7 @@ pub(super) fn install(image: &LoadedImage) -> Result<()> {
             make: std::mem::transmute::<usize, Make>(image_base + make),
             image_base,
             image_size: image.info().size_of_image as usize,
-            upscaling: UpscalingProbe::locate(image),
+            upscaling: UpscalingSection::locate(image),
         }
     };
     if HOOKS.set(hooks).is_err() {
@@ -124,6 +129,12 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
         .as_deref()
         .and_then(|bytes| i32_at(bytes, 0x10))
         .unwrap_or_default() as u32;
+    if label == GRAPHICS_LABEL {
+        GRAPHICS_TEXT.with_borrow_mut(Vec::clear);
+    }
+    if let Some(probe) = &hooks.upscaling {
+        probe.provide_text(hooks.image_base);
+    }
     let previous = VISIT.replace(VisitState { label, made: 0 });
     (hooks.visit)(source, visitor, after);
     let current = VISIT.replace(previous);
@@ -133,6 +144,12 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
         && let Some(owner) = context.as_deref().and_then(|bytes| usize_at(bytes, 0x18))
         && owner != 0
     {
+        if !CENSUS.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            let mut keys = GRAPHICS_TEXT.with_borrow(Clone::clone);
+            keys.sort_unstable();
+            keys.dedup();
+            super::menu_text::census(&keys);
+        }
         // SAFETY: this is the live menu for the tab being built at the
         // verified call, after the stock row traversal and before flattening.
         unsafe { probe.append(owner) };
@@ -169,6 +186,9 @@ fn record_row(hooks: &Hooks, state: VisitState, row: usize) {
     let mut fields = [0; 8];
     for (field, bytes) in fields.iter_mut().zip(bytes[0x18..].as_chunks::<4>().0) {
         *field = u32::from_le_bytes(*bytes);
+    }
+    if state.label == GRAPHICS_LABEL {
+        GRAPHICS_TEXT.with_borrow_mut(|keys| keys.extend(fields[1..3].iter().filter(|&&k| k != 0)));
     }
     tracing::info!(target: "menu_trace", tab = %format_args!("{:08x}", state.label),
                    number = state.made, vtable = %format_args!("title+{vtable_rva:#x}"),

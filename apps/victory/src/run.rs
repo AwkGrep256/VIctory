@@ -231,7 +231,7 @@ fn diagnostics(
     console: Console,
 ) -> Result<()> {
     crate::title_patch::apply(image, cfg, console)?;
-    crate::menu_trace::start(image)?;
+    crate::menu_trace::start(image, cfg)?;
     victory_loader::dump_stacks_on_schedule();
     victory_hle::modules::audio::capture::start();
     watch(image.base(), image.info().size_of_image as usize);

@@ -25,6 +25,38 @@ pub fn read_memory(at: usize, len: usize) -> Option<Vec<u8>> {
     (ok != 0 && read == len).then_some(copy)
 }
 
+/// The committed, read-write, file- or section-mapped regions of this
+/// process between `start` and `end`, as `(base, size)`: for diagnostics
+/// that look for title data in its mapped memory.
+pub fn mapped_regions(start: usize, end: usize) -> Vec<(usize, usize)> {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_MAPPED, MEMORY_BASIC_INFORMATION, PAGE_READWRITE, VirtualQuery,
+    };
+    let mut found = Vec::new();
+    let mut at = start;
+    while at < end {
+        // SAFETY: zeroes are a valid MEMORY_BASIC_INFORMATION.
+        let mut region: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: describes our own address space into `region`, of its size.
+        if unsafe { VirtualQuery(at as *const c_void, &mut region, size_of_val(&region)) } == 0 {
+            break;
+        }
+        let base = region.BaseAddress as usize;
+        let next = base.saturating_add(region.RegionSize);
+        if region.State == MEM_COMMIT
+            && region.Type == MEM_MAPPED
+            && region.Protect == PAGE_READWRITE
+        {
+            found.push((base, region.RegionSize));
+        }
+        if next <= at {
+            break;
+        }
+        at = next;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

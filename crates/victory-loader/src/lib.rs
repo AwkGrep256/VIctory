@@ -50,7 +50,7 @@ pub use crash::{
     locate, log_crash, log_crashes_to, note_title_output, report_crashes, report_unhandled,
 };
 #[cfg(all(windows, feature = "diagnostics"))]
-pub use memory::read_memory;
+pub use memory::{mapped_regions, read_memory};
 #[cfg(all(windows, feature = "diagnostics"))]
 pub use patch::CodeWrite;
 pub use prepare::{PrepareError, PreparedImage, prepare};
