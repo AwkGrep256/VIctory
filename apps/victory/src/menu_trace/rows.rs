@@ -41,6 +41,21 @@ static HOOKS: OnceLock<Hooks> = OnceLock::new();
 struct VisitState {
     label: u32,
     made: u32,
+    /// Name ID of the last Graphics row that had one.
+    last_named: u32,
+    /// Nameless rows built since that one.
+    unnamed_run: u8,
+}
+
+impl VisitState {
+    const fn new(label: u32) -> Self {
+        Self {
+            label,
+            made: 0,
+            last_named: 0,
+            unnamed_run: 0,
+        }
+    }
 }
 
 /// Whether the text census has run.
@@ -49,7 +64,7 @@ static CENSUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 thread_local! {
     /// The stock Graphics rows' name and help IDs, gathered during a visit.
     static GRAPHICS_TEXT: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-    static VISIT: Cell<VisitState> = const { Cell::new(VisitState { label: 0, made: 0 }) };
+    static VISIT: Cell<VisitState> = const { Cell::new(VisitState::new(0)) };
 }
 
 pub(super) fn install(image: &LoadedImage) -> Result<()> {
@@ -138,7 +153,7 @@ extern "win64" fn visit_rows(source: usize, visitor: usize, after: usize) {
     if let Some(probe) = &hooks.upscaling {
         probe.provide_text(hooks.image_base);
     }
-    let previous = VISIT.replace(VisitState { label, made: 0 });
+    let previous = VISIT.replace(VisitState::new(label));
     (hooks.visit)(source, visitor, after);
     let current = VISIT.replace(previous);
     if label == GRAPHICS_LABEL
@@ -175,6 +190,9 @@ extern "win64" fn make_row(descriptor: usize) -> usize {
         return row;
     }
     state.made += 1;
+    if state.label == GRAPHICS_LABEL {
+        name_unnamed_row(row, &mut state);
+    }
     VISIT.set(state);
     if state.made <= MAX_ROWS {
         record_row(hooks, state, row);
@@ -200,6 +218,44 @@ fn record_row(hooks: &Hooks, state: VisitState, row: usize) {
     tracing::info!(target: "menu_trace", tab = %format_args!("{:08x}", state.label),
                    number = state.made, vtable = %format_args!("title+{vtable_rva:#x}"),
                    metadata = %format_args!("{fields:08x?}"), "native settings row metadata");
+}
+
+/// Gives a stock Graphics row that has no name ID (so no text can be found
+/// for it) VIctory's IDs, recognised by the named row before it.
+fn name_unnamed_row(row: usize, state: &mut VisitState) {
+    use victory_core::settings::stock_labels::{unnamed, unnamed_for_locale};
+    const NAME: usize = 0x1c;
+    const HELP: usize = 0x20;
+    let Some(ids) = read_memory(row + NAME, 8) else {
+        return;
+    };
+    let (name, help) = (
+        u32::from_le_bytes(ids[..4].try_into().unwrap()),
+        u32::from_le_bytes(ids[4..].try_into().unwrap()),
+    );
+    if name != 0 {
+        (state.last_named, state.unnamed_run) = (name, 0);
+        return;
+    }
+    state.unnamed_run = state.unnamed_run.saturating_add(1);
+    let locale = std::env::var("VICTORY_LOCALE").unwrap_or_default();
+    let Some(entry) = unnamed(
+        unnamed_for_locale(&locale),
+        state.last_named,
+        state.unnamed_run,
+    ) else {
+        return;
+    };
+    // SAFETY: the row the title's factory just returned, on the menu thread,
+    // before the caller sees it; the same fields its own init writes.
+    unsafe {
+        std::ptr::write_unaligned((row + NAME) as *mut u32, entry.name.id());
+        if help == 0 {
+            std::ptr::write_unaligned((row + HELP) as *mut u32, entry.help.id());
+        }
+    }
+    tracing::debug!(target: "menu_trace", after = %format_args!("{:08x}", state.last_named),
+                    nth = state.unnamed_run, name = entry.name.english(), "nameless row named");
 }
 
 fn i32_at(bytes: &[u8], offset: usize) -> Option<i32> {

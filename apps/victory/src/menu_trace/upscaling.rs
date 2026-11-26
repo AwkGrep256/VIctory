@@ -72,6 +72,11 @@ impl UpscalingSection {
                 .iter()
                 .flat_map(|label| label.texts()),
         );
+        texts.extend(
+            victory_core::settings::stock_labels::unnamed_for_locale(&locale)
+                .iter()
+                .flat_map(|row| [row.name, row.help]),
+        );
         texts
     }
 
@@ -100,6 +105,12 @@ impl UpscalingSection {
         if group == 0 {
             return;
         }
+        // Diagnostics, once: every group's heading ID, to give the stock
+        // headings text.
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            log_group_headings(owner, group);
+        }
         for setting in ROWS {
             // SAFETY: the helper allocates a pooled row and appends it to
             // this group; the action ID is empty and runs nothing.
@@ -120,6 +131,49 @@ impl UpscalingSection {
             }
         }
         tracing::info!(target: "menu_trace", rows = ROWS.len(), "appended VIctory's Upscaling section");
+    }
+}
+
+/// Diagnostics: finds the owner's group array (a pointer in the owner that
+/// `group` lies in, at a whole number of strides) and logs each group's
+/// heading ID (`+0x10`) and order (`+0x14`), as seen for VIctory's own.
+fn log_group_headings(owner: usize, group: usize) {
+    use victory_loader::read_memory;
+    let u32_at = |at: usize| read_memory(at, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let Some(words) = read_memory(owner, 0x300) else {
+        return;
+    };
+    for (i, word) in words.as_chunks::<8>().0.iter().enumerate() {
+        let start = usize::from_le_bytes(*word);
+        let Some(delta) = group.checked_sub(start).filter(|&d| d < 0x800) else {
+            continue;
+        };
+        for stride in (0x30..=0x60).step_by(8) {
+            if delta % stride != 0 {
+                continue;
+            }
+            let mut headings = Vec::new();
+            for n in 0..24 {
+                let at = start + n * stride;
+                let (Some(cap), Some(count), Some(label), Some(order)) = (
+                    u32_at(at),
+                    u32_at(at + 4),
+                    u32_at(at + 0x10),
+                    u32_at(at + 0x14),
+                ) else {
+                    break;
+                };
+                if label == 0 || order > 0xffff || cap > 4096 || count > cap {
+                    break;
+                }
+                headings.push(format!("{label:08x}/{order}"));
+            }
+            if headings.len() > delta / stride {
+                tracing::info!(target: "menu_trace", owner_offset = %format_args!("{:#x}", i * 8),
+                               stride = %format_args!("{stride:#x}"), groups = ?headings,
+                               "settings group headings");
+            }
+        }
     }
 }
 

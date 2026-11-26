@@ -454,6 +454,122 @@ pub fn for_locale(_locale: &str) -> &'static [StockLabel] {
     EN
 }
 
+/// A stock row the title builds with no name ID at all, so no text can be
+/// looked up for it. It is recognised by the named row before it: the
+/// `nth` nameless row (from 1) right after the row whose name ID is
+/// `after`. VIctory gives it IDs of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnnamedRow {
+    pub after: u32,
+    pub nth: u8,
+    pub name: Text,
+    pub help: Text,
+}
+
+/// English for the nameless stock Graphics rows (the setting each controls
+/// in the comment).
+pub const EN_UNNAMED: &[UnnamedRow] = &[
+    UnnamedRow {
+        after: 0xb95f_c799, // Level of detail distance
+        nth: 1,
+        name: Text::own(
+            "victory_stock_texture_streaming",
+            "Texture streaming quality",
+        ),
+        help: Text::own(
+            "victory_stock_texture_streaming_desc",
+            "How quickly detailed textures load in.",
+        ),
+    }, // textureStreamingQuality
+    UnnamedRow {
+        after: 0xb95f_c799,
+        nth: 2,
+        name: Text::own("victory_stock_lens_flare_res", "Lens flare resolution"),
+        help: Text::own(
+            "victory_stock_lens_flare_res_desc",
+            "How much lens flares are scaled down. Higher is faster.",
+        ),
+    }, // lensFlaresScreenResDivExponent
+    UnnamedRow {
+        after: 0x4d02_1b51, // Particle lighting quality
+        nth: 1,
+        name: Text::own(
+            "victory_stock_character_textures",
+            "Character texture quality",
+        ),
+        help: Text::own(
+            "victory_stock_character_textures_desc",
+            "Resolution of character textures.",
+        ),
+    }, // pedMaxTextureQuality
+    UnnamedRow {
+        after: 0x4d02_1b51,
+        nth: 2,
+        name: Text::own(
+            "victory_stock_accessory_textures",
+            "Accessory texture quality",
+        ),
+        help: Text::own(
+            "victory_stock_accessory_textures_desc",
+            "Resolution of textures on hats, glasses and other accessories.",
+        ),
+    }, // pedPropMaxTextureQuality
+    UnnamedRow {
+        after: 0x73c2_58a0, // Soft shadows
+        nth: 1,
+        name: Text::own("victory_stock_sharpening", "Sharpening"),
+        help: Text::own(
+            "victory_stock_sharpening_desc",
+            "Turns image sharpening on or off.",
+        ),
+    }, // sharpenEnabled
+    UnnamedRow {
+        after: 0xa178_3cb0, // Tree tessellation
+        nth: 1,
+        name: Text::own("victory_stock_distant_objects", "Distant object quality"),
+        help: Text::own(
+            "victory_stock_distant_objects_desc",
+            "Detail of the simplified stand-ins drawn for far-away objects.",
+        ),
+    }, // imposterQuality
+    UnnamedRow {
+        after: 0x0bd3_a384, // Water lighting quality
+        nth: 1,
+        name: Text::own(
+            "victory_stock_water_reflection_width",
+            "Water reflection width",
+        ),
+        help: Text::own(
+            "victory_stock_water_reflection_width_desc",
+            "Horizontal resolution of water reflections.",
+        ),
+    }, // waterReflectionResX
+    UnnamedRow {
+        after: 0x0bd3_a384,
+        nth: 2,
+        name: Text::own(
+            "victory_stock_water_reflection_height",
+            "Water reflection height",
+        ),
+        help: Text::own(
+            "victory_stock_water_reflection_height_desc",
+            "Vertical resolution of water reflections.",
+        ),
+    }, // waterReflectionResY
+];
+
+/// The nameless-row table for a locale; English when there is none.
+pub fn unnamed_for_locale(_locale: &str) -> &'static [UnnamedRow] {
+    EN_UNNAMED
+}
+
+/// The entry for the `nth` nameless row after the row named `after`.
+pub fn unnamed(table: &'static [UnnamedRow], after: u32, nth: u8) -> Option<&'static UnnamedRow> {
+    table
+        .iter()
+        .find(|row| row.after == after && row.nth == nth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::text::joaat;
@@ -495,6 +611,28 @@ mod tests {
             assert_ne!(label.name_id, 0);
             assert_eq!(label.help.is_some(), label.help_id != 0, "{}", label.name);
         }
+    }
+
+    #[test]
+    fn every_unnamed_row_follows_a_labelled_row_and_has_unique_ids() {
+        for row in EN_UNNAMED {
+            assert!(
+                EN.iter().any(|l| l.name_id == row.after),
+                "{}",
+                row.name.english()
+            );
+            assert!(row.nth >= 1);
+            assert_eq!(unnamed(EN_UNNAMED, row.after, row.nth), Some(row));
+        }
+        let mut ids: Vec<u32> = EN_UNNAMED
+            .iter()
+            .flat_map(|r| [r.name.id(), r.help.id()])
+            .collect();
+        ids.extend(EN.iter().flat_map(StockLabel::texts).map(Text::id));
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "an ID repeats");
     }
 
     #[test]
