@@ -454,6 +454,86 @@ pub fn for_locale(_locale: &str) -> &'static [StockLabel] {
     EN
 }
 
+/// Help for a stock row that has a name but no help ID: VIctory gives it
+/// a help ID of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtraHelp {
+    /// The row's name ID.
+    pub row: u32,
+    pub help: Text,
+}
+
+/// English help for the stock Graphics rows without a help ID.
+pub const EN_EXTRA_HELP: &[ExtraHelp] = &[
+    ExtraHelp {
+        row: 0x21ea_1218, // Alpha transmission
+        help: Text::own(
+            "victory_stock_alpha_transmission_desc",
+            "How light shines through thin surfaces such as leaves and fabric.",
+        ),
+    },
+    ExtraHelp {
+        row: 0x1501_c237, // Ray-traced sun shadows
+        help: Text::own(
+            "victory_stock_rt_sun_shadows_desc",
+            "Uses ray tracing for shadows from the sun and moon.",
+        ),
+    },
+    ExtraHelp {
+        row: 0x24e6_fd43, // Ray-traced local shadows
+        help: Text::own(
+            "victory_stock_rt_local_shadows_desc",
+            "Uses ray tracing for shadows from lamps and other nearby lights.",
+        ),
+    },
+    ExtraHelp {
+        row: 0x7eb7_28dd, // Ray-traced distant light shadows
+        help: Text::own(
+            "victory_stock_rt_distant_light_shadows_desc",
+            "Uses ray tracing for shadows from far-away lights.",
+        ),
+    },
+    ExtraHelp {
+        row: 0x8ef0_e277, // Ray-traced dynamic shadows
+        help: Text::own(
+            "victory_stock_rt_dynamic_shadows_desc",
+            "Uses ray tracing for shadows of moving characters and vehicles.",
+        ),
+    },
+];
+
+/// The extra-help table for a locale; English when there is none.
+pub fn extra_help_for_locale(_locale: &str) -> &'static [ExtraHelp] {
+    EN_EXTRA_HELP
+}
+
+/// A heading for a stock settings group the title builds without one. The
+/// group is recognised by a row it holds (that row's name ID), not by its
+/// place in the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupHeading {
+    /// Name ID of a row in the group.
+    pub holds: u32,
+    pub heading: Text,
+}
+
+/// English headings for the untitled stock Graphics groups.
+pub const EN_HEADINGS: &[GroupHeading] = &[
+    GroupHeading {
+        holds: 0xff7f_05de, // Display adapter
+        heading: Text::own("victory_stock_group_display", "Display"),
+    },
+    GroupHeading {
+        holds: 0xd1cc_b6de, // Async compute
+        heading: Text::own("victory_stock_group_advanced", "Advanced"),
+    },
+];
+
+/// The heading table for a locale; English when there is none.
+pub fn headings_for_locale(_locale: &str) -> &'static [GroupHeading] {
+    EN_HEADINGS
+}
+
 /// A stock row the title builds with no name ID at all, so no text can be
 /// looked up for it. It is recognised by the named row before it: the
 /// `nth` nameless row (from 1) right after the row whose name ID is
@@ -628,6 +708,28 @@ mod tests {
             .iter()
             .flat_map(|r| [r.name.id(), r.help.id()])
             .collect();
+        ids.extend(EN.iter().flat_map(StockLabel::texts).map(Text::id));
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "an ID repeats");
+    }
+
+    #[test]
+    fn extra_help_and_headings_point_at_labelled_rows() {
+        for extra in EN_EXTRA_HELP {
+            let row = EN
+                .iter()
+                .find(|l| l.name_id == extra.row)
+                .expect("labelled row");
+            assert_eq!(row.help_id, 0, "{} already has help", row.name);
+        }
+        for heading in EN_HEADINGS {
+            assert!(EN.iter().any(|l| l.name_id == heading.holds));
+        }
+        let mut ids: Vec<u32> = EN_EXTRA_HELP.iter().map(|e| e.help.id()).collect();
+        ids.extend(EN_HEADINGS.iter().map(|h| h.heading.id()));
+        ids.extend(EN_UNNAMED.iter().flat_map(|r| [r.name.id(), r.help.id()]));
         ids.extend(EN.iter().flat_map(StockLabel::texts).map(Text::id));
         let count = ids.len();
         ids.sort_unstable();

@@ -235,6 +235,9 @@ fn name_unnamed_row(row: usize, state: &mut VisitState) {
     );
     if name != 0 {
         (state.last_named, state.unnamed_run) = (name, 0);
+        if help == 0 {
+            give_extra_help(row, name);
+        }
         return;
     }
     state.unnamed_run = state.unnamed_run.saturating_add(1);
@@ -256,6 +259,20 @@ fn name_unnamed_row(row: usize, state: &mut VisitState) {
     }
     tracing::debug!(target: "menu_trace", after = %format_args!("{:08x}", state.last_named),
                     nth = state.unnamed_run, name = entry.name.english(), "nameless row named");
+}
+
+/// Gives a named stock row without a help ID VIctory's help, if it has one.
+fn give_extra_help(row: usize, name: u32) {
+    use victory_core::settings::stock_labels::extra_help_for_locale;
+    let locale = std::env::var("VICTORY_LOCALE").unwrap_or_default();
+    if let Some(extra) = extra_help_for_locale(&locale)
+        .iter()
+        .find(|e| e.row == name)
+    {
+        // SAFETY: as in `name_unnamed_row`: the factory's fresh row, its
+        // help field, on the menu thread.
+        unsafe { std::ptr::write_unaligned((row + 0x20) as *mut u32, extra.help.id()) };
+    }
 }
 
 fn i32_at(bytes: &[u8], offset: usize) -> Option<i32> {

@@ -77,6 +77,16 @@ impl UpscalingSection {
                 .iter()
                 .flat_map(|row| [row.name, row.help]),
         );
+        texts.extend(
+            victory_core::settings::stock_labels::extra_help_for_locale(&locale)
+                .iter()
+                .map(|e| e.help),
+        );
+        texts.extend(
+            victory_core::settings::stock_labels::headings_for_locale(&locale)
+                .iter()
+                .map(|h| h.heading),
+        );
         texts
     }
 
@@ -105,12 +115,9 @@ impl UpscalingSection {
         if group == 0 {
             return;
         }
-        // Diagnostics, once: every group's heading ID, to give the stock
-        // headings text.
-        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            log_group_headings(owner, group);
-        }
+        // Untitled stock groups get VIctory's headings (rows are built by
+        // now; the menu is flattened after this visit).
+        title_groups(owner, group);
         for setting in ROWS {
             // SAFETY: the helper allocates a pooled row and appends it to
             // this group; the action ID is empty and runs nothing.
@@ -134,45 +141,68 @@ impl UpscalingSection {
     }
 }
 
-/// Diagnostics: finds the owner's group array (a pointer in the owner that
-/// `group` lies in, at a whole number of strides) and logs each group's
-/// heading ID (`+0x10`) and order (`+0x14`), as seen for VIctory's own.
-fn log_group_headings(owner: usize, group: usize) {
+/// Gives each untitled stock group in the owner's group array the heading
+/// VIctory has for it, recognised by a row it holds. The array is the one
+/// that holds `group` (VIctory's own, just made), found through a pointer in
+/// the owner at a whole number of group strides from it. A group keeps
+/// `{cap: u32, count: u32, rows: *usize, heading: u32, order: u32}` first.
+fn title_groups(owner: usize, group: usize) {
+    use victory_core::settings::stock_labels::headings_for_locale;
     use victory_loader::read_memory;
+    const STRIDE: usize = 0x60;
+    const HEADING: usize = 0x10;
+    const ROW_NAME: usize = 0x1c;
     let u32_at = |at: usize| read_memory(at, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let usize_at =
+        |at: usize| read_memory(at, 8).map(|b| usize::from_le_bytes(b.try_into().unwrap()));
     let Some(words) = read_memory(owner, 0x300) else {
         return;
     };
-    for (i, word) in words.as_chunks::<8>().0.iter().enumerate() {
-        let start = usize::from_le_bytes(*word);
-        let Some(delta) = group.checked_sub(start).filter(|&d| d < 0x800) else {
-            continue;
+    let Some(start) = words
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|w| usize::from_le_bytes(*w))
+        .find(|&p| {
+            group
+                .checked_sub(p)
+                .is_some_and(|d| d < 16 * STRIDE && d % STRIDE == 0)
+        })
+    else {
+        tracing::warn!(target: "menu_trace", "settings group array not found; headings left as they are");
+        return;
+    };
+    let locale = std::env::var("VICTORY_LOCALE").unwrap_or_default();
+    let headings = headings_for_locale(&locale);
+    for n in 0..16 {
+        let at = start + n * STRIDE;
+        let (Some(cap), Some(count), Some(rows), Some(heading), Some(order)) = (
+            u32_at(at),
+            u32_at(at + 4),
+            usize_at(at + 8),
+            u32_at(at + HEADING),
+            u32_at(at + 0x14),
+        ) else {
+            break;
         };
-        for stride in (0x30..=0x60).step_by(8) {
-            if delta % stride != 0 {
-                continue;
-            }
-            let mut headings = Vec::new();
-            for n in 0..24 {
-                let at = start + n * stride;
-                let (Some(cap), Some(count), Some(label), Some(order)) = (
-                    u32_at(at),
-                    u32_at(at + 4),
-                    u32_at(at + 0x10),
-                    u32_at(at + 0x14),
-                ) else {
-                    break;
-                };
-                if label == 0 || order > 0xffff || cap > 4096 || count > cap {
-                    break;
-                }
-                headings.push(format!("{label:08x}/{order}"));
-            }
-            if headings.len() > delta / stride {
-                tracing::info!(target: "menu_trace", owner_offset = %format_args!("{:#x}", i * 8),
-                               stride = %format_args!("{stride:#x}"), groups = ?headings,
-                               "settings group headings");
-            }
+        if cap > 4096 || count > cap || order > 0xffff || (count != 0 && rows == 0) {
+            break;
+        }
+        let names: Vec<u32> = (0..count as usize)
+            .filter_map(|i| usize_at(rows + i * 8))
+            .filter_map(|row| u32_at(row + ROW_NAME))
+            .collect();
+        tracing::debug!(target: "menu_trace", n, heading = %format_args!("{heading:08x}"), order,
+                        rows = count, first = %format_args!("{:08x}", names.first().copied().unwrap_or(0)),
+                        "settings group");
+        if heading != 0 {
+            continue;
+        }
+        if let Some(h) = headings.iter().find(|h| names.contains(&h.holds)) {
+            // SAFETY: a live group in the owner's array, on the menu thread,
+            // before the menu is flattened; the field the title's own group
+            // helper writes the heading to.
+            unsafe { std::ptr::write_unaligned((at + HEADING) as *mut u32, h.heading.id()) };
         }
     }
 }
