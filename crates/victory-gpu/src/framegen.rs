@@ -12,8 +12,8 @@
 //! frame generation): AMD frame generation 4 wants the game's view
 //! matrices, which the upscale description does not carry.
 //!
-//! shortcut: an RGBA8 swap chain only; no HUD-less colour, so the UI is
-//! interpolated with the scene.
+//! RGBA8 swap chains only. An opt-in HUD-less path keeps the Series X HUD
+//! separate from the scene sent to FG3.
 
 use std::ffi::{CStr, c_void};
 use std::path::Path;
@@ -29,6 +29,8 @@ use windows::core::Interface;
 
 use crate::host::HostList;
 use crate::resource::HostTexture;
+
+pub(crate) mod hudless;
 
 const DLL: &str = "amd_fidelityfx_framegeneration_dx12.dll";
 const OK: u32 = 0;
@@ -429,6 +431,8 @@ pub(crate) struct Presentation {
     last_frame: u64,
     base_presents: u32,
     logged: bool,
+    hudless_pending: Option<Arc<hudless::Color>>,
+    hudless_in_flight: Option<Arc<hudless::Color>>,
 }
 
 impl Presentation {
@@ -472,23 +476,28 @@ impl Presentation {
         tracing::info!(provider = proxy.provider(), "FidelityFX frame generation: proxy swap chain");
         Some((
             swap_chain,
-            Self { api, proxy, generator: None, key: None, armed: false, next_id: 0, continuous: 0, last_frame: 0, base_presents: 0, logged: false },
+            Self { api, proxy, generator: None, key: None, armed: false, next_id: 0, continuous: 0, last_frame: 0, base_presents: 0, logged: false, hudless_pending: None, hudless_in_flight: None },
         ))
     }
 
     /// Frame generation off for the coming presents (another size, or no
     /// upscaled frame): waits for the proxy's queued frames.
     pub(crate) fn disable(&mut self, chain: &IDXGISwapChain3) {
-        if !self.armed {
+        if !self.armed && self.hudless_pending.is_none() && self.hudless_in_flight.is_none() {
             return;
         }
+        let mut disabled = true;
         if let Some(g) = &self.generator {
             let code = g.context.configure(&mut self.config(chain, false, [0; 2]));
             if code != OK {
                 tracing::warn!(code, "FidelityFX frame generation: not switched off");
+                disabled = false;
             }
         }
-        let _ = self.proxy.dispatch(&mut header(SWAPCHAIN_WAIT));
+        if self.proxy.dispatch(&mut header(SWAPCHAIN_WAIT)) == OK && disabled {
+            self.hudless_pending = None;
+            self.hudless_in_flight = None;
+        }
         self.armed = false;
     }
 
@@ -503,7 +512,10 @@ impl Presentation {
             generate_user: generator.map_or(null_mut(), |g| std::ptr::from_ref(g).cast_mut().cast()),
             enabled: armed,
             allow_async: false,
-            hudless: Resource { resource: null_mut(), description: [0; 8], state: 0 },
+            hudless: self.hudless_pending.as_deref().filter(|_| armed).map_or(
+                Resource { resource: null_mut(), description: [0; 8], state: 0 },
+                hudless::Color::resource,
+            ),
             flags: 0,
             only_generated: false,
             rect: [0, 0, display[0] as i32, display[1] as i32],
@@ -522,7 +534,15 @@ impl Presentation {
         list: &HostList,
         display: [u32; 2],
         frame: u64,
+        hudless: Option<Arc<hudless::Color>>,
     ) -> bool {
+        // Retry a failed drain before replacing a pinned copy.
+        if !self.armed && (self.hudless_pending.is_some() || self.hudless_in_flight.is_some()) {
+            self.disable(chain);
+            if self.hudless_pending.is_some() || self.hudless_in_flight.is_some() {
+                return false;
+            }
+        }
         let Some(input) = take_inputs().filter(|i| i.frame.render.into_iter().zip(display).all(|(r, d)| r > 0 && r <= d)) else {
             self.disable(chain);
             return false;
@@ -531,8 +551,12 @@ impl Presentation {
         let key = (display, input.frame.render, flags);
         if self.key != Some(key) {
             self.renew(chain, device, key);
+            if self.key != Some(key) {
+                return false;
+            }
         }
         let Some(g) = &self.generator else { return false };
+        self.hudless_pending = hudless;
         let code = g.context.configure(&mut self.config(chain, true, display));
         if code != OK {
             tracing::warn!(code, "FidelityFX frame generation: configure failed");
@@ -581,12 +605,19 @@ impl Presentation {
             let screen = display;
             tracing::info!(frame, render = ?input.frame.render, ?screen, "FidelityFX frame generation: first upscaled frame's depth and motion given to it");
         }
+        if self.hudless_pending.is_some() {
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| tracing::info!(frame, "FidelityFX FG3: using matched HUD-less color"));
+        }
         true
     }
 
     /// A new generator for (display, render, flags).
     fn renew(&mut self, chain: &IDXGISwapChain3, device: &ID3D12Device, key: ([u32; 2], [u32; 2], u32)) {
         self.disable(chain);
+        if self.hudless_pending.is_some() || self.hudless_in_flight.is_some() {
+            return;
+        }
         self.generator = None;
         self.key = Some(key);
         self.next_id = 0;
@@ -620,6 +651,9 @@ impl Presentation {
     /// After presenting frame `frame`: a failed generation switches it off;
     /// the first steady stretch is logged with the presents it made.
     pub(crate) fn presented(&mut self, chain: &IDXGISwapChain3, frame: u64) {
+        // A successful DX12 proxy Present waits for the previous frame's
+        // interpolation. Retain this frame's color until then or a drain.
+        self.hudless_in_flight = self.hudless_pending.take();
         let Some(g) = &self.generator else { return };
         let error = g.error.load(Ordering::Relaxed);
         if error != OK {
