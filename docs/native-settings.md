@@ -12,6 +12,8 @@ the pieces fit and how to add or change a setting.
 | `apps/victory/src/menu_trace/settings_list.rs` | The settings as the menu sees them: current choice, range, save | No (unit-tested) |
 | `apps/victory/src/menu_trace/upscaling.rs` | The Upscaling section: heading and the rows it holds | Yes: calls two title helpers, reads the group's row list |
 | `apps/victory/src/menu_trace/native_list.rs` | Turns a title row into a native ◀ ▶ row for one setting | Yes: rewrites title rows |
+| `crates/victory-core/src/settings/stock_labels.rs` | English for the title's own Graphics rows and group headings (one table per language) | No (pure, unit-tested) |
+| `apps/victory/src/menu_trace/menu_text.rs` | Finds the menu's text table and adds VIctory's text to it | Yes: inserts into the title's text table |
 
 A setting is a **fieldless enum** with one `Choice` impl. Everything else
 (the row's option count, its labels, reading the value at startup, writing it
@@ -136,11 +138,8 @@ file.
 * **Option names.** The row borrows the title's quality list class, so the
   menu shows that list's option names (Low, Medium, …) instead of ours. Our
   labels (`Opt::label`) are ready for when the option text path is found.
-* **Counter lags.** After ◀ ▶ the option text changes at once, but the
-  `n / count` counter updates when the tab is shown again: the title only
-  re-publishes a row after its "settings changed" event, which VIctory does
-  not send yet. (Publishing from commit is not an option: the UI context the
-  title passes to publish lives on its stack.)
+* **Frame generation is saved only.** The row stores `[graphics]
+  frame_generation`; this branch does not insert generated frames yet.
 * **Lists only.** Toggles and sliders use other native row kinds; they will
   get their own trait next to `Choice` once their rows are understood.
 * **Behind a switch.** The section only appears with
@@ -155,3 +154,35 @@ keys start with `victory_` (see `Text::own`). One title ID is used as-is
 section's *screen* ID (Display's "Video" sits under its screen `c399a717`),
 so the hidden Graphics tab's name goes under the screen VIctory registers it
 with, `9a46cdb1`.
+
+## The stock rows' text
+
+This build of the title ships no text for its own Graphics rows, so they
+show blank. `settings::stock_labels` gives them VIctory's English:
+
+* **Labelled rows** (`EN`): a row looks its name and help up by two IDs
+  (`joaat(key)` and `joaat(key + "_desc")`). Each entry holds those IDs and
+  our text; rows are matched by ID, never by position. Recovered keys check
+  the scheme in the tests.
+* **Nameless rows** (`EN_UNNAMED`): some rows have name ID 0, so nothing
+  can be looked up. The row hook recognises each as the *n*th nameless row
+  after a given labelled row and writes VIctory's IDs into it as the title
+  builds it. If an update moves them, they stay blank rather than wrong.
+* **Rows without help** (`EN_EXTRA_HELP`): get a help ID of ours the same way.
+* **Untitled groups** (`EN_HEADINGS`): some groups are built with heading ID
+  0. After the stock rows are built, each such group gets VIctory's heading,
+  recognised by a row it holds.
+
+Another language is one more table next to `EN` and a branch in the
+`*_for_locale` functions (`VICTORY_LOCALE`).
+
+## Finding the text table
+
+The menu's text table is loaded from a file when Settings opens, at a new
+address each run. VIctory's DirectStorage reader watches loaded data for the
+table's type hash (`dstorage::recent_reads`) and notes where it landed; the
+menu then only validates those spots (type hash, layout, a known label), in
+microseconds. A miss usually means the file is not loaded yet; after three,
+one read-only memory search runs on a background thread. The menu thread
+never searches memory. Measured: 0.012 ms to find it, about 0.4 ms in total
+on the first Settings open.
